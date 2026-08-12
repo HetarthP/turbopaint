@@ -66,6 +66,44 @@ def exact_input_comparison(reference: Any, actual: Any) -> dict[str, Any]:
     }
 
 
+def scheduler_transition(
+    *,
+    scheduler_class: Any,
+    scheduler_config: dict[str, Any],
+    noise_pred: Any,
+    latents: Any,
+    generator_state: Any,
+    device: Any,
+) -> tuple[Any, dict[str, Any]]:
+    """Run an isolated one-step transition from a fresh scheduler instance."""
+    import torch
+
+    scheduler = scheduler_class.from_config(scheduler_config)
+    scheduler.set_timesteps(1, device=device)
+    timestep = scheduler.timesteps[0]
+    generator = torch.Generator(device=device)
+    generator.set_state(generator_state.cpu())
+    model_output = noise_pred.to(device=device, dtype=latents.dtype).contiguous()
+    sample = latents.to(device=device).contiguous()
+    before = {
+        "timestep": float(timestep.detach().cpu()),
+        "timestep_dtype": str(timestep.dtype),
+        "noise_pred_dtype": str(model_output.dtype),
+        "latents_dtype": str(sample.dtype),
+        "step_index": scheduler.step_index,
+        "sigmas": [float(value) for value in scheduler.sigmas.detach().cpu()],
+    }
+    previous = scheduler.step(
+        model_output,
+        timestep,
+        sample,
+        generator=generator,
+        return_dict=False,
+    )[0]
+    before["step_index_after"] = scheduler.step_index
+    return previous.detach().cpu(), before
+
+
 def pytorch_trace(backend: Any, config: GenerationConfig) -> dict[str, Any]:
     """Reproduce the relevant Diffusers __call__ stages with trace tensors."""
     torch = backend._torch
@@ -97,6 +135,9 @@ def pytorch_trace(backend: Any, config: GenerationConfig) -> dict[str, Any]:
             "initial_latents": latents.detach().cpu(),
             "generator_state": generator.get_state(),
             "timestep": pipe.scheduler.timesteps.detach().cpu(),
+            "scheduler_config": dict(pipe.scheduler.config),
+            "scheduler_sigmas": pipe.scheduler.sigmas.detach().cpu(),
+            "scheduler_step_index_before": pipe.scheduler.step_index,
         }
         timestep = pipe.scheduler.timesteps[0]
         timestep_input = timestep.reshape(1).to(torch.float32).contiguous()
@@ -193,6 +234,64 @@ def main(argv: Sequence[str] | None = None) -> int:
         (name for name in STAGES if not stages[name]["passed"]), None
     )
 
+    scheduler_class = backend.pipeline.scheduler.__class__
+    pytorch_noise_on_pytorch_scheduler, pytorch_scheduler_state = scheduler_transition(
+        scheduler_class=scheduler_class,
+        scheduler_config=reference["scheduler_config"],
+        noise_pred=reference["noise_pred"],
+        latents=reference["initial_latents"],
+        generator_state=reference["generator_state"],
+        device=backend.device,
+    )
+    pytorch_noise_on_tensorrt_scheduler, tensorrt_scheduler_state = scheduler_transition(
+        scheduler_class=scheduler_class,
+        scheduler_config=actual["scheduler_config"],
+        noise_pred=reference["noise_pred"],
+        latents=reference["initial_latents"],
+        generator_state=reference["generator_state"],
+        device=backend.device,
+    )
+    tensorrt_noise_transition, _ = scheduler_transition(
+        scheduler_class=scheduler_class,
+        scheduler_config=actual["scheduler_config"],
+        noise_pred=actual["noise_pred"],
+        latents=reference["initial_latents"],
+        generator_state=reference["generator_state"],
+        device=backend.device,
+    )
+    scheduler_audit = {
+        "configs_identical": reference["scheduler_config"]
+        == actual["scheduler_config"],
+        "sigmas_identical": bool(
+            torch.equal(
+                reference["scheduler_sigmas"].cpu(),
+                actual["scheduler_sigmas"].cpu(),
+            )
+        ),
+        "pytorch_scheduler_state": pytorch_scheduler_state,
+        "tensorrt_scheduler_state": tensorrt_scheduler_state,
+        "same_noise_cross_scheduler": tensor_comparison(
+            pytorch_noise_on_pytorch_scheduler,
+            pytorch_noise_on_tensorrt_scheduler,
+            rtol=0.0,
+            atol=0.0,
+        ),
+        "tensorrt_noise_recomputed_transition": tensor_comparison(
+            actual["scheduler_latents"],
+            tensorrt_noise_transition,
+            rtol=0.0,
+            atol=0.0,
+        ),
+    }
+    noise_mean = stages["noise_pred"]["mean_absolute_error"]
+    noise_max = stages["noise_pred"]["max_absolute_error"]
+    latent_mean = stages["scheduler_latents"]["mean_absolute_error"]
+    latent_max = stages["scheduler_latents"]["max_absolute_error"]
+    scheduler_audit["observed_error_amplification"] = {
+        "mean_ratio": latent_mean / noise_mean if noise_mean else None,
+        "max_ratio": latent_max / noise_max if noise_max else None,
+    }
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     reference_path = args.output_dir / "pytorch.png"
     actual_path = args.output_dir / "tensorrt.png"
@@ -207,6 +306,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "resolution": [512, 512],
         "inputs": inputs,
         "stages": stages,
+        "scheduler_audit": scheduler_audit,
         "first_failed_stage": first_failure,
         "pytorch_image": str(reference_path),
         "tensorrt_image": str(actual_path),

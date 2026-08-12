@@ -351,6 +351,13 @@ creation and restored for TensorRT, and that generator is passed into Euler
 ancestral `scheduler.step`; omitting it changes scheduler noise despite a fixed
 initial seed. Tolerances are not adjusted automatically.
 
+The scheduler audit also rebuilds fresh schedulers from both saved configs and
+runs counterfactual transitions with the same `noise_pred`, initial latent,
+timestep schedule, and post-latent RNG state. This distinguishes scheduler
+configuration/math differences from high-sigma amplification of an upstream
+UNet error. The report includes scheduler sigmas, dtypes, step indices, and the
+observed error-amplification ratio.
+
 Run the TensorRT smoke test (one warm-up plus one checked 512x512 image):
 
 ```bash

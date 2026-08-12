@@ -18,7 +18,8 @@ def step_scheduler(
     latents: Any,
     generator: Any,
 ) -> Any:
-    """Match Diffusers by forwarding the seeded generator to stochastic steps."""
+    """Match Diffusers dtype and RNG behavior for the scheduler transition."""
+    noise_pred = noise_pred.to(device=latents.device, dtype=latents.dtype).contiguous()
     return scheduler.step(
         noise_pred,
         timestep,
@@ -151,6 +152,9 @@ class SDXLTurboTensorRT(InferenceBackend):
                         "prompt_embeds": prompt_embeds.detach().clone(),
                         "pooled_prompt_embeds": pooled_prompt_embeds.detach().clone(),
                         "time_ids": self._time_ids.detach().clone(),
+                        "scheduler_config": dict(pipe.scheduler.config),
+                        "scheduler_sigmas": pipe.scheduler.sigmas.detach().clone(),
+                        "scheduler_step_index_before": pipe.scheduler.step_index,
                     }
                 )
             for timestep in pipe.scheduler.timesteps:
@@ -167,6 +171,9 @@ class SDXLTurboTensorRT(InferenceBackend):
                         "time_ids": self._time_ids,
                     }
                 )["noise_pred"]
+                noise_pred = noise_pred.to(
+                    device=latents.device, dtype=latents.dtype
+                ).contiguous()
                 if capture_trace:
                     trace["noise_pred"] = noise_pred.detach().clone()
                 latents = step_scheduler(

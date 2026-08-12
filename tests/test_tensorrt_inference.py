@@ -58,6 +58,19 @@ def test_trace_stage_order_finds_first_divergence() -> None:
 def test_scheduler_receives_fixed_generator() -> None:
     sentinel_generator = object()
 
+    class Tensor:
+        device = "cuda"
+        dtype = "float16"
+
+        def to(self, **kwargs):
+            assert kwargs == {"device": "cuda", "dtype": "float16"}
+            return self
+
+        def contiguous(self):
+            return self
+
+    tensor = Tensor()
+
     class Scheduler:
         def step(self, noise, timestep, latents, **kwargs):
             assert kwargs == {
@@ -67,6 +80,6 @@ def test_scheduler_receives_fixed_generator() -> None:
             return ("updated-latents",)
 
     assert (
-        step_scheduler(Scheduler(), "noise", "timestep", "latents", sentinel_generator)
+        step_scheduler(Scheduler(), tensor, "timestep", tensor, sentinel_generator)
         == "updated-latents"
     )
