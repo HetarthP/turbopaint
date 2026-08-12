@@ -124,6 +124,17 @@ def parser_errors(parser: Any) -> list[str]:
     return [str(parser.get_error(index)) for index in range(parser.num_errors)]
 
 
+def create_network(builder: Any) -> Any:
+    """Create a modern explicit-batch, strongly typed TensorRT network.
+
+    TensorRT 11 removed EXPLICIT_BATCH and enables strong typing by default.
+    Passing zero is also correct for TensorRT 10, where explicit batch is the
+    only supported mode. Do not pass STRONGLY_TYPED on TensorRT 11 because it is
+    deprecated and ignored there.
+    """
+    return builder.create_network(0)
+
+
 def _write_failure(request: BuildRequest, identity: dict[str, Any], error: Exception) -> Path:
     report = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -179,8 +190,7 @@ def build_engine(request: BuildRequest) -> tuple[Path, Path, bool]:
     logger = trt.Logger(severity)
     try:
         builder = trt.Builder(logger)
-        explicit_batch = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-        network = builder.create_network(explicit_batch)
+        network = create_network(builder)
         parser = trt.OnnxParser(network, logger)
         if not parser.parse_from_file(str(request.onnx_path)):
             details = parser_errors(parser)
@@ -193,12 +203,10 @@ def build_engine(request: BuildRequest) -> tuple[Path, Path, bool]:
         config = builder.create_builder_config()
         workspace_bytes = int(request.workspace_gib * 1024**3)
         config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
-        if request.component == "unet":
-            if not builder.platform_has_fast_fp16:
-                raise RuntimeError("GPU does not report fast FP16 support required by the UNet build")
-            config.set_flag(trt.BuilderFlag.FP16)
-        elif hasattr(trt.BuilderFlag, "TF32"):
-            config.clear_flag(trt.BuilderFlag.TF32)
+        # TensorRT 11 removed weak-typing precision flags (including FP16) and
+        # platform_has_fast_fp16. Precision is defined by the strongly typed
+        # validated ONNX graph and checked above; no builder precision flags are
+        # needed or valid. The UNet graph is FP16 and the VAE graph is FP32.
 
         serialized = builder.build_serialized_network(network, config)
         if serialized is None:

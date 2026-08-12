@@ -4,6 +4,7 @@ import pytest
 
 from src.tensorrt.build.engine import (
     BuildRequest,
+    create_network,
     parser_errors,
     precision_for,
     validate_network_contract,
@@ -86,10 +87,22 @@ def test_parser_errors_preserve_every_message() -> None:
     assert parser_errors(Parser()) == ["error-0", "error-1"]
 
 
+def test_network_creation_uses_modern_zero_flags() -> None:
+    class Builder:
+        received_flags = None
+
+        def create_network(self, flags):
+            self.received_flags = flags
+            return "network"
+
+    builder = Builder()
+    assert create_network(builder) == "network"
+    assert builder.received_flags == 0
+
+
 def test_component_clis_expose_help_without_tensorrt() -> None:
     with pytest.raises(SystemExit) as unet_exit:
         unet_main(["--help"])
     with pytest.raises(SystemExit) as vae_exit:
         vae_main(["--help"])
     assert unet_exit.value.code == vae_exit.value.code == 0
-

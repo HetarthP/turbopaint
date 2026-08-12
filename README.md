@@ -235,11 +235,11 @@ benchmark TensorRT, or establish a speedup.
 The build stage consumes only the validated, fixed-shape ONNX graphs. It does
 not implement pipeline inference yet.
 
-- The UNet builder enables TensorRT FP16 and retains the FP32 scheduler
-  timestep input from the validated graph.
-- The VAE decoder builder does not enable FP16 and disables TF32 when the
-  installed TensorRT API exposes that flag. This preserves its validated FP32
-  safety contract.
+- The UNet is strongly typed FP16 by its validated ONNX graph and retains the
+  FP32 scheduler timestep input. TensorRT 11 removed the old weak-typing
+  `BuilderFlag.FP16`; no obsolete precision flag is used.
+- The VAE decoder remains strongly typed FP32 by its validated ONNX graph. No
+  weak-typing or TF32 builder flag is used, preserving its safety contract.
 - Both builders use batch 1 and the exact tensor names, shapes, and dtypes in
   the table above. A mismatch stops the build before serialization.
 - The default TensorRT workspace limit is 4 GiB and can be changed with
@@ -310,6 +310,11 @@ Verify the serialized plans and inspect their real metadata:
 
 These commands build and cache engines only. They do not execute an end-to-end
 TensorRT pipeline, benchmark it, or establish a speedup.
+
+The builder uses `builder.create_network(0)`. TensorRT 11 is always explicit
+batch and strongly typed, so the removed `EXPLICIT_BATCH` flag and deprecated
+`STRONGLY_TYPED` flag are intentionally absent. The same zero-flags call is
+valid on modern TensorRT 10 releases.
 
 ## Tests
 
