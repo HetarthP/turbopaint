@@ -45,6 +45,48 @@ def _failure_path(engine_path: Path) -> Path:
     return engine_path.with_suffix(".build_error.json")
 
 
+def prepare_output_directory(engine_path: Path) -> Path:
+    """Create and return the shared output directory for every component."""
+    directory = engine_path.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    if not directory.is_dir():
+        raise RuntimeError(f"TensorRT output directory was not created: {directory}")
+    return directory
+
+
+def _atomic_write_buffer(path: Path, data: Any) -> int:
+    """Write a buffer-compatible object without duplicating a large TRT plan."""
+    prepare_output_directory(path)
+    temporary = path.with_name(f"{path.name}.tmp")
+    try:
+        view = memoryview(data)
+        with temporary.open("wb") as handle:
+            written = handle.write(view)
+            handle.flush()
+        if written != view.nbytes or written <= 0:
+            raise OSError(
+                f"Incomplete TensorRT serialization: wrote {written} of {view.nbytes} bytes"
+            )
+        temporary.replace(path)
+    except Exception:
+        if temporary.exists():
+            temporary.unlink()
+        raise
+    return path.stat().st_size
+
+
+def _atomic_write_json(path: Path, document: dict[str, Any]) -> None:
+    prepare_output_directory(path)
+    temporary = path.with_name(f"{path.name}.tmp")
+    try:
+        temporary.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+    except Exception:
+        if temporary.exists():
+            temporary.unlink()
+        raise
+
+
 def _runtime_identity(
     torch: Any,
     trt: Any,
@@ -152,6 +194,9 @@ def _write_failure(request: BuildRequest, identity: dict[str, Any], error: Excep
 
 def build_engine(request: BuildRequest) -> tuple[Path, Path, bool]:
     """Build or reuse a TensorRT plan; return engine, metadata, and cache-hit."""
+    # Prepare the component output before validation or the potentially lengthy
+    # TensorRT build. UNet and VAE use this identical path.
+    prepare_output_directory(request.engine_path)
     if not request.onnx_path.is_file():
         raise FileNotFoundError(f"Validated ONNX model not found: {request.onnx_path}")
     validation_path = request.onnx_path.with_suffix(".validation.json")
@@ -185,7 +230,6 @@ def build_engine(request: BuildRequest) -> tuple[Path, Path, bool]:
     if not request.force and _cache_is_valid(request.engine_path, identity):
         return request.engine_path, _metadata_path(request.engine_path), True
 
-    request.engine_path.parent.mkdir(parents=True, exist_ok=True)
     severity = trt.Logger.VERBOSE if request.verbose else trt.Logger.INFO
     logger = trt.Logger(severity)
     try:
@@ -213,11 +257,13 @@ def build_engine(request: BuildRequest) -> tuple[Path, Path, bool]:
             details = parser_errors(parser)
             suffix = "\n".join(details) if details else "See TensorRT logger output above."
             raise RuntimeError(f"TensorRT engine build returned no serialized plan.\n{suffix}")
-        temporary_engine = request.engine_path.with_suffix(".plan.tmp")
-        temporary_engine.write_bytes(bytes(serialized))
-        if temporary_engine.stat().st_size <= 0:
-            raise RuntimeError("TensorRT wrote an empty engine file")
-        temporary_engine.replace(request.engine_path)
+        try:
+            engine_size = _atomic_write_buffer(request.engine_path, serialized)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to serialize TensorRT engine to {request.engine_path}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
         metadata = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -225,12 +271,13 @@ def build_engine(request: BuildRequest) -> tuple[Path, Path, bool]:
             **identity,
             "workspace_bytes": workspace_bytes,
             "engine_path": str(request.engine_path),
-            "engine_file_size_bytes": request.engine_path.stat().st_size,
+            "engine_file_size_bytes": engine_size,
             "onnx_path": str(request.onnx_path),
             "onnx_validation_report": str(validation_path),
         }
         metadata_path = _metadata_path(request.engine_path)
-        metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+        # Metadata is deliberately committed only after the final plan exists.
+        _atomic_write_json(metadata_path, metadata)
         failure_path = _failure_path(request.engine_path)
         if failure_path.exists():
             failure_path.unlink()

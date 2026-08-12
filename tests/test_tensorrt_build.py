@@ -4,9 +4,11 @@ import pytest
 
 from src.tensorrt.build.engine import (
     BuildRequest,
+    _atomic_write_buffer,
     create_network,
     parser_errors,
     precision_for,
+    prepare_output_directory,
     validate_network_contract,
 )
 from src.tensorrt.build.unet import main as unet_main
@@ -60,6 +62,21 @@ def test_build_request_defaults_and_validation() -> None:
     assert request.force is False
     with pytest.raises(ValueError, match="workspace_gib"):
         BuildRequest("unet", Path("x"), Path("y"), workspace_gib=0)
+
+
+def test_unet_output_directory_is_created(tmp_path: Path) -> None:
+    engine = tmp_path / "artifacts" / "tensorrt" / "unet" / "model.plan"
+    directory = prepare_output_directory(engine)
+    assert directory == engine.parent
+    assert directory.is_dir()
+
+
+def test_atomic_engine_write_creates_directory_and_plan(tmp_path: Path) -> None:
+    engine = tmp_path / "artifacts" / "tensorrt" / "unet" / "model.plan"
+    size = _atomic_write_buffer(engine, bytearray(b"serialized-engine"))
+    assert engine.read_bytes() == b"serialized-engine"
+    assert size == len(b"serialized-engine")
+    assert not engine.with_name("model.plan.tmp").exists()
 
 
 def test_static_network_contract_accepts_expected_unet() -> None:
