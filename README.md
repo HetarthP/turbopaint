@@ -230,6 +230,87 @@ replaced, return to the cloned repository, then run:
 These commands validate ONNX graphs only. They do not build TensorRT engines,
 benchmark TensorRT, or establish a speedup.
 
+## TensorRT engine build stage
+
+The build stage consumes only the validated, fixed-shape ONNX graphs. It does
+not implement pipeline inference yet.
+
+- The UNet builder enables TensorRT FP16 and retains the FP32 scheduler
+  timestep input from the validated graph.
+- The VAE decoder builder does not enable FP16 and disables TF32 when the
+  installed TensorRT API exposes that flag. This preserves its validated FP32
+  safety contract.
+- Both builders use batch 1 and the exact tensor names, shapes, and dtypes in
+  the table above. A mismatch stops the build before serialization.
+- The default TensorRT workspace limit is 4 GiB and can be changed with
+  `--workspace-gib` if the target environment requires it.
+
+Successful plans and metadata are cached at:
+
+```text
+artifacts/tensorrt/unet/model.plan
+artifacts/tensorrt/unet/model.metadata.json
+artifacts/tensorrt/vae_decoder/model.plan
+artifacts/tensorrt/vae_decoder/model.metadata.json
+```
+
+Metadata records the TensorRT version, GPU name and compute capability,
+precision policy, fixed input/output contract, ONNX bundle SHA-256 (including
+external tensor data), workspace size,
+and serialized engine size. A cache is reused only when those identity fields
+match. TensorRT plans are not generally portable across TensorRT releases and
+GPU architectures; use `--force` to rebuild deliberately.
+
+Parser rejection prints every `OnnxParser` error with its index. Other build
+failures retain TensorRT logger output and write a neighboring
+`.build_error.json`. A failed or empty plan is never treated as a cache hit.
+
+### Google Colab TensorRT build commands
+
+Run these after both ONNX validation reports exist. First inspect Colab's CUDA
+major version:
+
+```python
+import torch
+print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0))
+assert torch.cuda.is_available()
+```
+
+For a CUDA 12.x Colab runtime, install NVIDIA's full builder package and verify
+that its Python builder initializes:
+
+```bash
+!python -m pip install --upgrade pip wheel
+!python -m pip install --upgrade tensorrt-cu12
+!python -c "import tensorrt as trt; print(trt.__version__); assert trt.Builder(trt.Logger())"
+```
+
+If the preceding Python check reports CUDA 13.x instead, install
+`tensorrt-cu13`; do not mix CUDA-major package variants. The pip package is
+enough for these Python builders and does not include `trtexec`.
+
+Build each engine independently. `--verbose` is recommended for this first
+validation run because it preserves detailed TensorRT layer/build logging:
+
+```bash
+%cd /content/turbopaint
+!python -m src.tensorrt.build.unet --verbose
+!python -m src.tensorrt.build.vae_decoder --verbose
+```
+
+Verify the serialized plans and inspect their real metadata:
+
+```bash
+!test -s artifacts/tensorrt/unet/model.plan
+!test -s artifacts/tensorrt/vae_decoder/model.plan
+!ls -lh artifacts/tensorrt/unet/model.plan artifacts/tensorrt/vae_decoder/model.plan
+!cat artifacts/tensorrt/unet/model.metadata.json
+!cat artifacts/tensorrt/vae_decoder/model.metadata.json
+```
+
+These commands build and cache engines only. They do not execute an end-to-end
+TensorRT pipeline, benchmark it, or establish a speedup.
+
 ## Tests
 
 ```bash

@@ -10,6 +10,7 @@ from typing import Any, Sequence
 
 from src.runtime import require_cuda
 from src.tensorrt.export.contracts import contract_as_dict
+from src.tensorrt.export.fingerprint import onnx_bundle_sha256
 
 MODEL_ID = "stabilityai/sdxl-turbo"
 OPSET_VERSION = 17
@@ -155,6 +156,8 @@ def write_validation_report(
     model_id: str,
     result: dict[str, float | bool],
 ) -> Path:
+    import onnx
+
     report = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "component": component,
@@ -162,6 +165,7 @@ def write_validation_report(
         "status": "validated",
         "opset_version": OPSET_VERSION,
         "fixed_shapes": True,
+        "onnx_bundle_sha256": onnx_bundle_sha256(output_path, onnx),
         "tensor_contract": contract_as_dict(component),
         "numerical_validation": result,
     }
