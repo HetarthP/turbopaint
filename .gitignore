@@ -22,4 +22,6 @@ outputs/*
 !outputs/.gitkeep
 benchmarks/*
 !benchmarks/.gitkeep
+artifacts/*
+!artifacts/.gitkeep
 .cache/

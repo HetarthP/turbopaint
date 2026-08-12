@@ -1,0 +1,5 @@
+-r requirements.txt
+# Install the onnxruntime-gpu release matching the target PyTorch CUDA/cuDNN
+# major versions separately; see README.md. Do not install CPU onnxruntime.
+onnx>=1.16.0,<2.0
+numpy>=1.26.0,<2.0

@@ -1,8 +1,9 @@
 # TurboPaint
 
-TurboPaint is a GPU-accelerated real-time AI image generation project. This
-first milestone provides a modular PyTorch/Diffusers baseline for SDXL-Turbo;
-TensorRT and custom CUDA backends are reserved for later milestones.
+TurboPaint is a GPU-accelerated real-time AI image generation project. The
+validated baseline uses PyTorch/Diffusers with SDXL-Turbo. The current stage
+adds fixed-shape ONNX export and numerical validation as preparation for a
+TensorRT backend; no TensorRT engine or custom CUDA backend exists yet.
 
 ## Repository layout
 
@@ -11,10 +12,11 @@ src/
   backends/    Shared inference interface and generation configuration
   baseline/   PyTorch + Diffusers inference backend
   benchmark/  CUDA timing, statistics, configuration, and JSON reporting
-  tensorrt/   Reserved for a future TensorRT backend
+  tensorrt/   ONNX export contracts/tools and future TensorRT backend
   cuda/       Reserved for future custom CUDA kernels
 outputs/      Generated images (ignored by Git)
 benchmarks/   Structured benchmark JSON (ignored by Git)
+artifacts/    Exported ONNX graphs and validation reports (ignored by Git)
 tests/        Unit tests
 ```
 
@@ -140,6 +142,93 @@ copied from the macOS development environment.
 For comparable runs, keep the software environment, GPU power/clock policy,
 prompt, generation configuration, and benchmark configuration fixed. Record
 the generated JSON alongside any future TensorRT results.
+
+## ONNX export stage
+
+The export boundary targets the two substantial image-generation networks, not
+the complete Python pipeline:
+
+- **Conditional UNet:** exported at batch 1 and fixed 512x512 image resolution
+  (64x64 latent resolution). Its floating inputs and output are FP16.
+- **VAE decoder:** exported at the same fixed latent/image resolution. The stock
+  SDXL VAE declares `force_upcast=True`, so this graph deliberately uses FP32 to
+  match Diffusers and avoid half-precision overflow. It must not be reported as
+  an FP16 result.
+
+Tokenizers, both CLIP text encoders, scheduler setup/step math, random latent
+creation, and PIL post-processing remain in PyTorch/Diffusers. With one
+denoising step, prompt encoding happens once and is not the primary optimization
+target. Keeping scheduler and orchestration outside ONNX also lets the future
+backend implement the existing `InferenceBackend` contract cleanly.
+
+### Fixed tensor contracts
+
+| Graph | Direction | Name | Shape | Dtype |
+|---|---|---|---|---|
+| UNet | input | `sample` | `[1, 4, 64, 64]` | `float16` |
+| UNet | input | `timestep` | `[1]` | `float32` |
+| UNet | input | `encoder_hidden_states` | `[1, 77, 2048]` | `float16` |
+| UNet | input | `text_embeds` | `[1, 1280]` | `float16` |
+| UNet | input | `time_ids` | `[1, 6]` | `float16` |
+| UNet | output | `noise_pred` | `[1, 4, 64, 64]` | `float16` |
+| VAE decoder | input | `latents` | `[1, 4, 64, 64]` | `float32` |
+| VAE decoder | output | `images` | `[1, 3, 512, 512]` | `float32` |
+
+The exports use ONNX opset 17, static shapes, external weight data for graphs
+over ONNX's 2 GiB protobuf limit, and deterministic random validation tensors.
+Each command runs the PyTorch component and ONNX Runtime CUDA execution with the
+same tensors, checks numerical tolerance, and writes a `.validation.json`
+report only on success.
+
+Unsupported PyTorch-to-ONNX operators stop export. A neighboring
+`.export_error.json` records the exception and tensor contract; do not use a
+partially written graph or silently accept an unvalidated operator. An ONNX
+Runtime CUDA provider/operator failure likewise stops numerical validation.
+
+### Google Colab validation commands
+
+Start a Colab runtime with a T4 GPU, then run these cells from a fresh session.
+The ONNX Runtime pin below targets CUDA 12.x plus cuDNN 9, matching PyTorch 2.4+
+CUDA 12 environments. The check must pass; if Colab changes its major runtime
+versions, select the matching package from ONNX Runtime's official CUDA
+compatibility table instead of forcing this pin.
+
+```bash
+!nvidia-smi
+!git clone https://github.com/HetarthP/turbopaint.git
+%cd turbopaint
+!python -m src.runtime.validate
+```
+
+```python
+import torch
+print("torch CUDA:", torch.version.cuda)
+print("cuDNN:", torch.backends.cudnn.version())
+assert torch.cuda.is_available()
+assert str(torch.version.cuda).startswith("12."), "Select a matching ORT build"
+assert torch.backends.cudnn.version() // 10000 == 9, "Select a matching ORT build"
+```
+
+```bash
+!pip install -r requirements-onnx.txt
+!pip install onnxruntime-gpu==1.20.1
+```
+
+Restart the Colab runtime after installation if its preinstalled packages were
+replaced, return to the cloned repository, then run:
+
+```bash
+%cd /content/turbopaint
+!python -m src.runtime.validate
+!python -m src.tensorrt.export.unet
+!python -m src.tensorrt.export.vae_decoder
+!find artifacts/onnx -maxdepth 3 -type f -printf '%p %k KiB\n'
+!cat artifacts/onnx/unet/model.validation.json
+!cat artifacts/onnx/vae_decoder/model.validation.json
+```
+
+These commands validate ONNX graphs only. They do not build TensorRT engines,
+benchmark TensorRT, or establish a speedup.
 
 ## Tests
 

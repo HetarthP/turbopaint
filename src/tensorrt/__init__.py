@@ -1,2 +1,2 @@
-"""Reserved for the future TensorRT backend."""
+"""ONNX/TensorRT preparation; no TensorRT engine backend exists yet."""
 
