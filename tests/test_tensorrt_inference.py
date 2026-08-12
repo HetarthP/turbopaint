@@ -4,7 +4,7 @@ import pytest
 
 from src.backends import GenerationConfig
 from src.tensorrt.benchmark import baseline_comparison, build_parser as benchmark_parser
-from src.tensorrt.pipeline import SDXLTurboTensorRT
+from src.tensorrt.pipeline import SDXLTurboTensorRT, step_scheduler
 from src.tensorrt.smoke_test import build_parser as smoke_parser
 from src.tensorrt.validate import build_parser as validation_parser
 
@@ -43,3 +43,30 @@ def test_reference_comparison_is_explicit_not_a_claim() -> None:
     assert ratios["throughput_ratio"] == pytest.approx(1.0)
     assert "same T4" in comparison["note"]
 
+
+def test_trace_stage_order_finds_first_divergence() -> None:
+    from src.tensorrt.validate import STAGES
+
+    assert STAGES == (
+        "noise_pred",
+        "scheduler_latents",
+        "vae_output",
+        "final_image_tensor",
+    )
+
+
+def test_scheduler_receives_fixed_generator() -> None:
+    sentinel_generator = object()
+
+    class Scheduler:
+        def step(self, noise, timestep, latents, **kwargs):
+            assert kwargs == {
+                "generator": sentinel_generator,
+                "return_dict": False,
+            }
+            return ("updated-latents",)
+
+    assert (
+        step_scheduler(Scheduler(), "noise", "timestep", "latents", sentinel_generator)
+        == "updated-latents"
+    )

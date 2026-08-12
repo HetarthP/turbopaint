@@ -11,6 +11,23 @@ from src.runtime import require_cuda
 from src.tensorrt.runtime import TensorRTEngine
 
 
+def step_scheduler(
+    scheduler: Any,
+    noise_pred: Any,
+    timestep: Any,
+    latents: Any,
+    generator: Any,
+) -> Any:
+    """Match Diffusers by forwarding the seeded generator to stochastic steps."""
+    return scheduler.step(
+        noise_pred,
+        timestep,
+        latents,
+        generator=generator,
+        return_dict=False,
+    )[0]
+
+
 class SDXLTurboTensorRT(InferenceBackend):
     """Run text/scheduler logic in Diffusers and image networks in TensorRT."""
 
@@ -40,6 +57,9 @@ class SDXLTurboTensorRT(InferenceBackend):
             model_id, torch_dtype=torch.float16, variant="fp16"
         ).to(self.device)
         self.pipeline.set_progress_bar_config(disable=True)
+        if getattr(self.pipeline.vae.config, "latents_mean", None) is not None:
+            raise RuntimeError("TensorRT VAE engine does not support latents_mean/std")
+        self.vae_scaling_factor = float(self.pipeline.vae.config.scaling_factor)
         self.pipeline.unet = None
         self.pipeline.vae = None
         gc.collect()
@@ -71,35 +91,73 @@ class SDXLTurboTensorRT(InferenceBackend):
             raise ValueError("SDXL-Turbo TensorRT baseline requires guidance_scale=0.0")
 
     def generate(self, config: GenerationConfig) -> Any:
+        return self.generate_trace(config, capture_trace=False)["image"]
+
+    def generate_trace(
+        self,
+        config: GenerationConfig,
+        *,
+        prompt_embeds: Any | None = None,
+        pooled_prompt_embeds: Any | None = None,
+        initial_latents: Any | None = None,
+        generator_state: Any | None = None,
+        capture_trace: bool = True,
+    ) -> dict[str, Any]:
+        """Generate while retaining CUDA intermediates for numerical debugging."""
         self._validate_config(config)
         torch = self._torch
         pipe = self.pipeline
         generator = torch.Generator(device=self.device).manual_seed(config.seed)
 
         with torch.inference_mode():
-            prompt_embeds, _, pooled_prompt_embeds, _ = pipe.encode_prompt(
-                prompt=config.prompt,
-                device=self.device,
-                num_images_per_prompt=1,
-                do_classifier_free_guidance=False,
-            )
+            if prompt_embeds is None or pooled_prompt_embeds is None:
+                prompt_embeds, _, pooled_prompt_embeds, _ = pipe.encode_prompt(
+                    prompt=config.prompt,
+                    device=self.device,
+                    num_images_per_prompt=1,
+                    do_classifier_free_guidance=False,
+                )
+            else:
+                prompt_embeds = prompt_embeds.to(self.device)
+                pooled_prompt_embeds = pooled_prompt_embeds.to(self.device)
             prompt_embeds = prompt_embeds.to(dtype=torch.float16).contiguous()
             pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=torch.float16).contiguous()
 
             pipe.scheduler.set_timesteps(config.inference_steps, device=self.device)
-            latents = pipe.prepare_latents(
-                1,
-                4,
-                config.height,
-                config.width,
-                prompt_embeds.dtype,
-                self.device,
-                generator,
-                None,
-            )
+            if initial_latents is None:
+                latents = pipe.prepare_latents(
+                    1,
+                    4,
+                    config.height,
+                    config.width,
+                    prompt_embeds.dtype,
+                    self.device,
+                    generator,
+                    None,
+                )
+            else:
+                latents = initial_latents.to(
+                    device=self.device, dtype=prompt_embeds.dtype
+                ).contiguous()
+                if generator_state is None:
+                    raise ValueError("generator_state is required with initial_latents")
+                generator.set_state(generator_state.cpu())
+            trace: dict[str, Any] = {}
+            if capture_trace:
+                trace.update(
+                    {
+                        "initial_latents": latents.detach().clone(),
+                        "timestep": pipe.scheduler.timesteps.detach().clone(),
+                        "prompt_embeds": prompt_embeds.detach().clone(),
+                        "pooled_prompt_embeds": pooled_prompt_embeds.detach().clone(),
+                        "time_ids": self._time_ids.detach().clone(),
+                    }
+                )
             for timestep in pipe.scheduler.timesteps:
                 latent_input = pipe.scheduler.scale_model_input(latents, timestep).contiguous()
                 timestep_input = timestep.reshape(1).to(dtype=torch.float32).contiguous()
+                if capture_trace:
+                    trace["unet_sample"] = latent_input.detach().clone()
                 noise_pred = self.unet.execute(
                     {
                         "sample": latent_input,
@@ -109,14 +167,26 @@ class SDXLTurboTensorRT(InferenceBackend):
                         "time_ids": self._time_ids,
                     }
                 )["noise_pred"]
-                latents = pipe.scheduler.step(
-                    noise_pred, timestep, latents, return_dict=False
-                )[0]
+                if capture_trace:
+                    trace["noise_pred"] = noise_pred.detach().clone()
+                latents = step_scheduler(
+                    pipe.scheduler, noise_pred, timestep, latents, generator
+                )
+                if capture_trace:
+                    trace["scheduler_latents"] = latents.detach().clone()
 
             self._vae_input.copy_(latents)
             decoded = self.vae_decoder.execute({"latents": self._vae_input})["images"]
+            if capture_trace:
+                trace["vae_output"] = decoded.detach().clone()
             if getattr(pipe, "watermark", None) is not None:
                 decoded = pipe.watermark.apply_watermark(decoded)
-            # Diffusers converts the CUDA tensor to PIL here; this also ensures
-            # TensorRT decode completion before the persistent buffer is reused.
-            return pipe.image_processor.postprocess(decoded, output_type="pil")[0]
+            if capture_trace:
+                final_tensor = pipe.image_processor.postprocess(
+                    decoded, output_type="pt"
+                )[0]
+                trace["final_image_tensor"] = final_tensor.detach().clone()
+            trace["image"] = pipe.image_processor.postprocess(
+                decoded, output_type="pil"
+            )[0]
+            return trace

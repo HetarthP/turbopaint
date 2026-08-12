@@ -342,6 +342,15 @@ python -m src.tensorrt.validate \
   --seed 0
 ```
 
+The validator compares identical initial latents, scheduler timestep, scaled
+UNet sample, prompt embeddings, pooled embeddings, and SDXL time IDs. It then
+reports mean/max absolute error for `noise_pred`, the stochastic
+scheduler-updated latent, raw VAE output, and final normalized image tensor in
+that order. The CUDA generator state is captured immediately after latent
+creation and restored for TensorRT, and that generator is passed into Euler
+ancestral `scheduler.step`; omitting it changes scheduler noise despite a fixed
+initial seed. Tolerances are not adjusted automatically.
+
 Run the TensorRT smoke test (one warm-up plus one checked 512x512 image):
 
 ```bash
