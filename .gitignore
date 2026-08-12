@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.venv/
+venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.idea/
+.vscode/
+.DS_Store
+
+# Generated artifacts and downloaded model data
+outputs/*
+!outputs/.gitkeep
+benchmarks/*
+!benchmarks/.gitkeep
+.cache/
