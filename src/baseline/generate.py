@@ -77,6 +77,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         metadata=collect_torch_metadata(torch),
         latencies_ms=result.latencies_ms,
         peak_gpu_memory_bytes=result.peak_gpu_memory_bytes,
+        peak_device_memory_used_bytes=result.peak_device_memory_used_bytes,
     )
     report_path = save_report(report)
 

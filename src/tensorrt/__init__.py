@@ -1,2 +1,5 @@
-"""ONNX/TensorRT preparation; no TensorRT engine backend exists yet."""
+"""ONNX export, TensorRT engine build, and hybrid inference backend."""
 
+from .pipeline import SDXLTurboTensorRT
+
+__all__ = ["SDXLTurboTensorRT"]

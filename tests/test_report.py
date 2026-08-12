@@ -22,6 +22,8 @@ def make_report():
         ),
         latencies_ms=[10.0, 20.0, 30.0],
         peak_gpu_memory_bytes=123456,
+        peak_device_memory_used_bytes=654321,
+        comparison={"reference": "test"},
     )
 
 
@@ -32,6 +34,8 @@ def test_report_contains_configuration_metadata_and_samples() -> None:
     assert report["seed"] == 42
     assert report["latencies_ms"] == [10.0, 20.0, 30.0]
     assert report["peak_gpu_memory_bytes"] == 123456
+    assert report["peak_device_memory_used_bytes"] == 654321
+    assert report["comparison"] == {"reference": "test"}
     assert report["summary"]["mean_ms"] == 20.0
 
 

@@ -316,6 +316,54 @@ batch and strongly typed, so the removed `EXPLICIT_BATCH` flag and deprecated
 `STRONGLY_TYPED` flag are intentionally absent. The same zero-flags call is
 valid on modern TensorRT 10 releases.
 
+## Hybrid TensorRT inference
+
+`SDXLTurboTensorRT` implements the same `InferenceBackend` contract as the
+PyTorch baseline. Tokenization, both CLIP encoders, one-step Euler scheduler,
+fixed-seed CUDA latent initialization, watermarking, and image post-processing
+remain in Diffusers. Only the conditional UNet and VAE decoder calls use their
+serialized TensorRT engines.
+
+Each engine and execution context is deserialized once. TensorRT input bindings
+point directly at CUDA PyTorch tensors on the current PyTorch stream, and output
+buffers are persistent across generations. No NumPy/CPU transfer occurs between
+the scheduler, UNet, and decoder. Because the validated decoder is FP32, one
+persistent FP32 latent staging buffer is retained for its input.
+
+Run end-to-end numerical validation before benchmarking. It generates the same
+prompt and fixed seed with the PyTorch backend, releases it, then runs TensorRT
+to avoid holding both complete implementations in T4 memory. Normalized RGB
+images, error metrics, and both image files are stored under
+`outputs/validation/`:
+
+```bash
+python -m src.tensorrt.validate \
+  "A cinematic photograph of a robot painting a sunset" \
+  --seed 0
+```
+
+Run the TensorRT smoke test (one warm-up plus one checked 512x512 image):
+
+```bash
+python -m src.tensorrt.smoke_test \
+  "A cinematic photograph of a robot painting a sunset" \
+  --seed 0
+```
+
+Run the comparable benchmark (five warm-ups, twenty CUDA-event measurements):
+
+```bash
+python -m src.tensorrt.benchmark \
+  "A cinematic photograph of a robot painting a sunset" \
+  --seed 0
+```
+
+The benchmark JSON records every latency, summary statistics, PyTorch allocator
+peak, observed whole-device memory usage, and ratios against the supplied T4
+PyTorch reference (610.60 ms mean, 654.38 ms p95, 1.64 images/s, 7.48 GiB peak
+allocated VRAM). Whole-device memory includes other processes and is identified
+separately. Ratios are measurements, not a speedup claim.
+
 ## Tests
 
 ```bash

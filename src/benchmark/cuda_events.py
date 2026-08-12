@@ -19,6 +19,7 @@ class BenchmarkResult(Generic[T]):
     statistics: LatencyStatistics
     latencies_ms: tuple[float, ...]
     peak_gpu_memory_bytes: int
+    peak_device_memory_used_bytes: int
     last_output: T
 
 
@@ -51,6 +52,8 @@ def benchmark_cuda(
         # Ensure warm-up work cannot overlap the measured region.
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        peak_device_memory_used_bytes = int(total_bytes - free_bytes)
 
         events: list[tuple[object, object]] = []
         for _ in range(config.measured_runs):
@@ -60,6 +63,10 @@ def benchmark_cuda(
             last_output = operation()
             end.record()
             events.append((start, end))
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            peak_device_memory_used_bytes = max(
+                peak_device_memory_used_bytes, int(total_bytes - free_bytes)
+            )
 
         torch.cuda.synchronize()
         peak_gpu_memory_bytes = int(torch.cuda.max_memory_allocated())
@@ -70,5 +77,6 @@ def benchmark_cuda(
         statistics=calculate_statistics(samples),
         latencies_ms=samples,
         peak_gpu_memory_bytes=peak_gpu_memory_bytes,
+        peak_device_memory_used_bytes=peak_device_memory_used_bytes,
         last_output=last_output,
     )

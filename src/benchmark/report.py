@@ -32,12 +32,14 @@ def build_report(
     metadata: RuntimeMetadata,
     latencies_ms: Sequence[float],
     peak_gpu_memory_bytes: int | None = None,
+    peak_device_memory_used_bytes: int | None = None,
+    comparison: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     samples = tuple(float(value) for value in latencies_ms)
     if len(samples) != benchmark.measured_runs:
         raise ValueError("latency count must equal configured measured_runs")
     summary = calculate_statistics(samples)
-    return {
+    report = {
         "timestamp": timestamp,
         "backend": backend,
         **asdict(metadata),
@@ -51,8 +53,12 @@ def build_report(
         "measured_runs": benchmark.measured_runs,
         "latencies_ms": list(samples),
         "peak_gpu_memory_bytes": peak_gpu_memory_bytes,
+        "peak_device_memory_used_bytes": peak_device_memory_used_bytes,
         "summary": summary.to_dict(),
     }
+    if comparison is not None:
+        report["comparison"] = dict(comparison)
+    return report
 
 
 def current_timestamp() -> str:
